@@ -1,0 +1,210 @@
+pipeline {
+    agent any
+    environment {
+        APP_NAME="capstone-microservice"
+        APP_REPO_NAME="cloudandcloud-repo/${APP_NAME}-app-dev"
+        AWS_ACCOUNT_ID=sh(script:'aws sts get-caller-identity --query Account --output text', returnStdout:true).trim()
+        AWS_REGION="us-east-1"
+        ECR_REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+        ANS_KEYPAIR="petclinic-${APP_NAME}-dev-${BUILD_NUMBER}.key"
+        ANSIBLE_PRIVATE_KEY_FILE="${WORKSPACE}/${ANS_KEYPAIR}"
+        ANSIBLE_HOST_KEY_CHECKING="False"
+    }
+    stages {
+        stage('ECR Repo Olusturuluyor') {
+            steps {
+                echo "${APP_NAME} app ECR Repo Kontrol Ediliyor, Yoksa Olusturuluyor"
+                sh '''
+                aws ecr describe-repositories --region ${AWS_REGION} --repository-name ${APP_REPO_NAME} >/dev/null 2>&1 || \
+                         aws ecr create-repository \
+                         --repository-name ${APP_REPO_NAME} \
+                         --image-scanning-configuration scanOnPush=true \
+                         --image-tag-mutability MUTABLE \
+                         --region ${AWS_REGION}
+                '''
+            }
+        }
+        stage('Package Application') {
+            steps {
+                echo 'Maven ile Uygulama .jar Olarak Paketleniyor'
+                sh ". ./.devops/jenkins/pipeline-dev-package-with-maven-container.sh"
+            }
+        }
+        stage('Docker Images TAG Hazirlama') {
+            steps {
+                echo 'Docker Images icin TAG Hazirlaniyor'
+                script {
+                    env.VERSION=sh(script:'. ${WORKSPACE}/spring-petclinic-admin-server/target/maven-archiver/pom.properties && echo $version', returnStdout: true).trim()
+                    env.IMAGE_TAG_ADMIN_SERVER="${ECR_REGISTRY}/${APP_REPO_NAME}:admin-server-v${VERSION}-b${BUILD_NUMBER}"
+
+                    env.VERSION=sh(script:'. ${WORKSPACE}/spring-petclinic-api-gateway/target/maven-archiver/pom.properties && echo $version', returnStdout: true).trim()
+                    env.IMAGE_TAG_API_GATEWAY="${ECR_REGISTRY}/${APP_REPO_NAME}:api-gateway-v${VERSION}-b${BUILD_NUMBER}"
+
+                    env.VERSION=sh(script:'. ${WORKSPACE}/spring-petclinic-config-server/target/maven-archiver/pom.properties && echo $version', returnStdout: true).trim()
+                    env.IMAGE_TAG_CONFIG_SERVER="${ECR_REGISTRY}/${APP_REPO_NAME}:config-server-v${VERSION}-b${BUILD_NUMBER}"
+
+                    env.VERSION=sh(script:'. ${WORKSPACE}/spring-petclinic-customers-service/target/maven-archiver/pom.properties && echo $version', returnStdout: true).trim()
+                    env.IMAGE_TAG_CUSTOMERS_SERVICE="${ECR_REGISTRY}/${APP_REPO_NAME}:customers-service-v${VERSION}-b${BUILD_NUMBER}"
+
+                    env.VERSION=sh(script:'. ${WORKSPACE}/spring-petclinic-discovery-server/target/maven-archiver/pom.properties && echo $version', returnStdout: true).trim()
+                    env.IMAGE_TAG_DISCOVERY_SERVER="${ECR_REGISTRY}/${APP_REPO_NAME}:discovery-server-v${VERSION}-b${BUILD_NUMBER}"
+
+                    env.VERSION=sh(script:'. ${WORKSPACE}/spring-petclinic-genai-service/target/maven-archiver/pom.properties && echo $version', returnStdout: true).trim()
+                    env.IMAGE_TAG_GENAI_SERVICE="${ECR_REGISTRY}/${APP_REPO_NAME}:genai-service-v${VERSION}-b${BUILD_NUMBER}"
+
+                    env.VERSION=sh(script:'. ${WORKSPACE}/spring-petclinic-vets-service/target/maven-archiver/pom.properties && echo $version', returnStdout: true).trim()
+                    env.IMAGE_TAG_VETS_SERVICE="${ECR_REGISTRY}/${APP_REPO_NAME}:vets-service-v${VERSION}-b${BUILD_NUMBER}"
+
+                    env.VERSION=sh(script:'. ${WORKSPACE}/spring-petclinic-visits-service/target/maven-archiver/pom.properties && echo $version', returnStdout: true).trim()
+                    env.IMAGE_TAG_VISITS_SERVICE="${ECR_REGISTRY}/${APP_REPO_NAME}:visits-service-v${VERSION}-b${BUILD_NUMBER}"
+
+                    env.IMAGE_TAG_GRAFANA_SERVICE="${ECR_REGISTRY}/${APP_REPO_NAME}:grafana-service"
+                    env.IMAGE_TAG_PROMETHEUS_SERVICE="${ECR_REGISTRY}/${APP_REPO_NAME}:prometheus-service"
+                }
+            }
+        }
+        stage('Docker Image Build Adimi') {
+            steps {
+                echo 'Dev Ortam Imajlar Olusturuluyor'
+                sh ". ./.devops/jenkins/pipeline-dev-build-tagged-docker-images-for-ecr.sh"
+                sh 'docker image ls'
+            }
+        }
+        stage('Docker Image ECR Repoya Push Adimi') {
+            steps {
+                echo "${APP_NAME} Docker Imajlar ECR Repoya Gonderiliyor "
+                sh ". ./.devops/jenkins/pipeline-dev-push-docker-images-to-ecr.sh"
+            }
+        }
+        stage('Create Key Pair for Ansible') {
+            steps {
+                echo "Creating Key Pair for ${APP_NAME} App"
+                sh "aws ec2 create-key-pair --region ${AWS_REGION} --key-name ${ANS_KEYPAIR} --query KeyMaterial --output text > ${ANS_KEYPAIR}"
+                sh "chmod 400 ${ANS_KEYPAIR}"
+            }
+        }
+
+        stage('K8s Test Ortaminin Kurulmasi') {
+            steps {
+                script {
+                    env.ANSIBLE_PRIVATE_KEY_FILE = "${WORKSPACE}/${ANS_KEYPAIR}"
+                }
+                echo 'Creating QA Automation Infrastructure for Dev Environment'
+                sh """
+                    sed -i "s/aws_key_pair.generated_key.key_name/\\\"${ANS_KEYPAIR}\\\"/g" .devops/k8s-infra/terraform/tenant/dev/main.tf
+                    sed -i "s|~/.ssh/devops-keypem-ansible.pem|${WORKSPACE}/${ANS_KEYPAIR}|g" .devops/k8s-infra/terraform/tenant/dev/ansible/inventory.ini
+                    cd .devops/k8s-infra/terraform
+                    terraform -chdir=tenant/dev init
+                    terraform -chdir=tenant/dev apply -auto-approve -no-color
+                """
+                script {
+                    echo "Kubernetes Master is not UP and running yet."
+                    env.id = sh(script: 'aws ec2 describe-instances --filters Name=tag-value,Values=master Name=tag-value,Values=tera-kube-ans Name=instance-state-name,Values=running --query Reservations[*].Instances[*].[InstanceId] --output text',  returnStdout:true).trim()
+                    sh 'aws ec2 wait instance-status-ok --instance-ids $id'
+                }
+            }
+        }
+
+        stage('Deploy App on Kubernetes cluster'){
+            steps {
+                    echo 'Deploying App on Kubernetes'
+
+                    // values.yaml üret
+                    sh '''
+                        envsubst < .devops/k8s/petclinic_chart/values-template.yaml \
+                        > .devops/k8s/petclinic_chart/values.yaml
+                    '''
+
+                    // Chart.yaml içinde versiyon numarasını BUILD_NUMBER ile değiştir
+                    sh '''
+                        sed -i "s/^version:.*/version: ${BUILD_NUMBER}/" \
+                        .devops/k8s/petclinic_chart/Chart.yaml
+                    '''
+
+                    // helm-s3 plugin yüklü değilse yükle
+                    sh '''
+                        if ! helm plugin list | grep -q s3; then
+                            helm plugin install https://github.com/hypnoglow/helm-s3.git
+                        fi
+                    '''
+
+                    // Helm repo ekle (varsa güncelle)
+                    sh '''
+                        if helm repo list | grep -q stable-petclinic; then
+                            helm repo remove stable-petclinic
+                        fi
+                        helm repo add stable-petclinic s3://petclinic-charts-rk/stable/myapp/
+                    '''
+
+                    // Chart paketle
+                    sh '''
+                        helm package .devops/k8s/petclinic_chart
+                    '''
+
+                    // Doğru isimle push et
+                    sh '''
+                        helm s3 push --force petclinic_chart-${BUILD_NUMBER}.tgz stable-petclinic
+                    '''
+
+                    // Ansible deploy hazırlıkları
+                    sh '''
+                        envsubst < .devops/ansible/playbooks/pipeline-dev-petclinic-deploy-template \
+                        > .devops/ansible/playbooks/dev-petclinic-deploy.yaml
+                        sleep 60
+                        ansible-playbook -i .devops/ansible/inventory/dev_stack_dynamic_inventory_aws_ec2.yaml \
+                        .devops/ansible/playbooks/dev-petclinic-deploy.yaml
+                    '''
+            }
+        }     
+
+        stage('Test the Application Deployment'){
+            steps {
+                echo "Check if the ${APP_NAME} app is ready or not"
+                script {
+                    env.MASTER_PUBLIC_IP = sh(script:"aws ec2 describe-instances --region ${AWS_REGION} --filters Name=tag-value,Values=master Name=tag-value,Values=tera-kube-ans Name=instance-state-name,Values=running --query Reservations[*].Instances[*].[PublicIpAddress] --output text", returnStdout:true).trim()
+                    while(true) {
+                        try{
+                            sh "curl -s ${MASTER_PUBLIC_IP}:30001"
+                            echo "${APP_NAME} app is successfully deployed."
+                            break
+                        }
+                        catch(Exception){
+                            echo "Could not connect to ${APP_NAME} app"
+                            sleep(5)
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('OTOMASYON TESTLERI'){
+            steps {
+                echo "DEV ORTAMI ICIN FONKSIYONEL TESTLER CALISIYOR"
+                // 5 dk boyunca uyu
+                sh "sleep 300" 
+            }
+        }
+ }
+
+    post {
+        always {
+            echo 'Deleting all local images'
+            sh 'docker image prune -af'
+            echo 'Delete the Image Repository on ECR'
+            sh """
+                aws ecr delete-repository \
+                  --repository-name ${APP_REPO_NAME} \
+                  --region ${AWS_REGION}\
+                  --force
+                """
+            echo 'Tear down the Kubernetes Cluster'
+            sh """
+            cd .devops/k8s-infra/terraform
+            terraform -chdir=tenant/dev destroy -auto-approve -no-color
+            """
+            echo "Delete existing key pair using AWS CLI"
+            sh "aws ec2 delete-key-pair --region ${AWS_REGION} --key-name ${ANS_KEYPAIR}"
+            sh "rm -rf ${ANS_KEYPAIR}"
+        }
+    }
+}
