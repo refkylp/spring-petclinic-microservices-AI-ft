@@ -1,11 +1,23 @@
 
+
+
+#------------------------------------------------------
+
+# module "vpc" {
+#   source              = "../../modules/vpc"
+#   name                = "capstone"
+#   vpc_cidr            = "10.0.0.0/16"
+#   public_subnet_cidrs = ["10.0.1.0/24", "10.0.2.0/24", "10.0.3.0/24"]
+#   azs                 = ["us-east-1a", "us-east-1b", "us-east-1c"]
+# }
+
 module "master" {
   source             = "../../modules/ec2"
   name               = "k8s-master-node"
   ami                = "ami-020cba7c55df1f615" # us-east-1 Canonical, Ubuntu, 24.04, amd64 noble image
   instance_type      = "t3a.medium"
-  subnet_id          = "subnet-069006f9830ccf5a2" #module.vpc.public_subnet_ids[0]
-  vpc_id             = "vpc-0d55f49d35490d88a"    #module.vpc.vpc_id
+  subnet_id          = "subnet-0b78db19a655d84fd" #module.vpc.public_subnet_ids[0]
+  vpc_id             = "vpc-01576a488cbfb349b"    #module.vpc.vpc_id
   key_name           = aws_key_pair.generated_key.key_name # "devops-keypem-va"
   security_group_ids = aws_security_group.ec2_sg.id
   user_data          = file("${path.module}/scripts/master_user_data.sh")
@@ -18,14 +30,13 @@ module "master" {
 
 }
 
-
 module "worker_1" {
   source             = "../../modules/ec2"
   name               = "k8s-worker1-node"
   ami                = "ami-020cba7c55df1f615" # us-east-1 Canonical, Ubuntu, 24.04, amd64 noble image
   instance_type      = "t3a.medium"
-  subnet_id          = "subnet-069006f9830ccf5a2" #module.vpc.public_subnet_ids[1]
-  vpc_id             = "vpc-0d55f49d35490d88a"    #module.vpc.vpc_id
+  subnet_id          = "subnet-0422d59cc6615b3f7" #module.vpc.public_subnet_ids[1]
+  vpc_id             = "vpc-01576a488cbfb349b"    #module.vpc.vpc_id
   key_name           = aws_key_pair.generated_key.key_name # "devops-keypem-va"
   security_group_ids = aws_security_group.ec2_sg.id
   user_data          = file("${path.module}/scripts/worker1_user_data.sh")
@@ -44,8 +55,8 @@ module "worker_2" {
   name               = "k8s-worker2-node"
   ami                = "ami-020cba7c55df1f615" # us-east-1 Canonical, Ubuntu, 24.04, amd64 noble image
   instance_type      = "t3a.medium"
-  subnet_id          = "subnet-069006f9830ccf5a2" #module.vpc.public_subnet_ids[2]
-  vpc_id             = "vpc-0d55f49d35490d88a"    #module.vpc.vpc_id
+  subnet_id          = "subnet-011f6bb6c5244e5bb" #module.vpc.public_subnet_ids[2]
+  vpc_id             = "vpc-01576a488cbfb349b"    #module.vpc.vpc_id
   key_name           = aws_key_pair.generated_key.key_name # "devops-keypem-va"
   security_group_ids = aws_security_group.ec2_sg.id
   user_data          = file("${path.module}/scripts/worker2_user_data.sh")
@@ -98,7 +109,7 @@ resource "null_resource" "join_workers" {
 
 
 resource "aws_security_group" "ec2_sg" {
-  vpc_id = "vpc-0d55f49d35490d88a"
+  vpc_id = "vpc-01576a488cbfb349b"
   name   = "K8S-CLUSTER-sg"
   tags = {
     Name = "K8S-CLUSTER-sg"
